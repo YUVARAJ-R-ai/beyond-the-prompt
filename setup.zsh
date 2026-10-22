@@ -10,6 +10,14 @@
 #     3. Zepher CLI (zepher-cli -> zepher)
 #     4. Orca Desktop Application (Orca.app)
 #     5. Orca CLI (orca)
+#     6. GitHub CLI (gh)
+#     7. GitHub authentication over SSH (gh login + SSH key + git identity)
+#     8. AI agent CLIs (Claude Code, OpenCode)
+#     9. jq
+#    10. Event skills (into ~/.claude/skills)
+#
+#   Uses the event USB kit ('Beyond the Prompt' folder) for offline installs
+#   of npm packages and jq when it is found (or given with --offline-kit).
 #
 #   Works both when cloned via Git and when run from an extracted GitHub ZIP
 #   archive (or via './bootstrap.zsh') on a clean Mac without Git or Homebrew.
@@ -29,6 +37,9 @@
 #   - Prefers per-user installations to avoid unnecessary administrator privileges.
 #   - Never collects, prints, or transmits API keys, tokens, or credentials.
 #   - Never modifies shell startup files (~/.zshrc, ~/.zprofile, etc.).
+#   - Never overwrites an existing SSH key; ~/.ssh/config is only changed when
+#     needed (Keychain passphrase or port-443 fallback), inside a marked block,
+#     with a backup copy.
 #   - Safe, resumable, and idempotent to run repeatedly.
 # =============================================================================
 
@@ -59,6 +70,29 @@ readonly ORCA_DMG_X64_URL="https://github.com/stablyai/orca/releases/latest/down
 readonly ORCA_RELEASES_API_URL="${ONBOARD_ORCA_RELEASES_API_URL:-https://api.github.com/repos/stablyai/orca/releases/latest}"
 readonly ORCA_RELEASES_URL="https://github.com/stablyai/orca/releases"
 
+readonly GH_CLI_URL="https://cli.github.com"
+readonly GH_RELEASES_LATEST_URL="${ONBOARD_GH_RELEASES_LATEST_URL:-https://github.com/cli/cli/releases/latest}"
+readonly GH_RELEASES_DOWNLOAD_BASE_URL="https://github.com/cli/cli/releases/download"
+readonly GH_SSH_DOCS_URL="https://docs.github.com/en/authentication/connecting-to-github-with-ssh"
+# Extra token scopes on top of gh's defaults: upload SSH keys + GitHub Projects commands
+readonly GH_AUTH_SCOPES="admin:public_key,project"
+readonly SSH_KEY_PATH="${ONBOARD_SSH_KEY_PATH:-${HOME}/.ssh/id_ed25519}"
+readonly SSH_CONFIG_BLOCK_BEGIN="# >>> beyond-the-prompt: GitHub SSH (managed by setup.zsh) >>>"
+readonly SSH_CONFIG_BLOCK_END="# <<< beyond-the-prompt: GitHub SSH <<<"
+
+readonly CLAUDE_CODE_NPM_PACKAGE="@anthropic-ai/claude-code"
+readonly CLAUDE_CODE_URL="https://www.npmjs.com/package/@anthropic-ai/claude-code"
+readonly OPENCODE_NPM_PACKAGE="opencode-ai"
+readonly OPENCODE_URL="https://opencode.ai"
+readonly JQ_URL="https://jqlang.org"
+readonly JQ_RELEASES_LATEST_URL="${ONBOARD_JQ_RELEASES_LATEST_URL:-https://github.com/jqlang/jq/releases/latest}"
+readonly JQ_RELEASES_DOWNLOAD_BASE_URL="https://github.com/jqlang/jq/releases/download"
+# Used when the "latest" redirect cannot be resolved; still verified against its sha256sum.txt
+readonly JQ_FALLBACK_TAG="jq-1.8.2"
+readonly SKILLS_TARGET_DIR="${ONBOARD_SKILLS_DIR:-${HOME}/.claude/skills}"
+# Name of the folder on the event USB stick (see START-HERE.txt on the stick)
+readonly OFFLINE_KIT_FOLDER="Beyond the Prompt"
+
 readonly GIT_MACOS_URL="https://git-scm.com/download/mac"
 readonly NODE_DOWNLOAD_URL="https://nodejs.org/en/download"
 readonly HOMEBREW_DOCS_URL="https://brew.sh"
@@ -88,6 +122,28 @@ DETAIL_ORCA_APP="Not checked"
 
 STATUS_ORCA_CLI="FAIL"
 DETAIL_ORCA_CLI="Not checked"
+
+STATUS_GH="FAIL"
+DETAIL_GH="Not checked"
+
+STATUS_GH_SSH="FAIL"
+DETAIL_GH_SSH="Not checked"
+
+STATUS_AGENTS="FAIL"
+DETAIL_AGENTS="Not checked"
+
+STATUS_JQ="FAIL"
+DETAIL_JQ="Not checked"
+
+STATUS_SKILLS="FAIL"
+DETAIL_SKILLS="Not checked"
+
+AGENTS_TO_INSTALL="${ONBOARD_AGENTS:-claude,opencode}"
+OFFLINE_KIT_ARG="${ONBOARD_OFFLINE_KIT:-}"
+OFFLINE_OS_DIR=""
+OFFLINE_NPM_CACHE=""
+typeset -a NPM_CACHE_ARGS
+NPM_CACHE_ARGS=()
 
 typeset -a RECOVERY_NOTES
 RECOVERY_NOTES=()
@@ -124,6 +180,11 @@ print_banner() {
   print "  3. Zepher CLI              (npm package: ${ZEPHER_NPM_PACKAGE} -> '${ZEPHER_BIN_NAME}')"
   print "  4. Orca Desktop App        (Agent Development Environment)"
   print "  5. Orca CLI                ('orca' command registered via Orca Settings)"
+  print "  6. GitHub CLI              ('gh' command)"
+  print "  7. GitHub over SSH         (gh login in your browser + SSH key for git)"
+  print "  8. AI agent CLIs           (${AGENTS_TO_INSTALL}; you sign in to them yourself)"
+  print "  9. jq                      (JSON tool used by the event's GitHub skills)"
+  print " 10. Event skills            (copied into ~/.claude/skills)"
   print ""
   print "${C_BLUE}Note on macOS Execution Permissions:${C_RESET}"
   print "  If macOS ever blocks this script from running, execute:"
@@ -137,6 +198,7 @@ print_banner() {
   print "  - Prefers per-user locations (~/.local, ~/Applications) to avoid sudo."
   print "  - Shell startup files (~/.zshrc, ~/.zprofile) are never modified."
   print "  - No API keys, tokens, or personal credentials are requested or collected."
+  print "    (You sign in to GitHub yourself in the browser; gh stores its token in the macOS Keychain.)"
   if [[ "$CHECK_ONLY" == "1" ]]; then
     print ""
     print "${C_YELLOW}[MODE] Running in --check-only mode (no installations will be performed).${C_RESET}"
@@ -182,6 +244,9 @@ macOS onboarding script for the AI Development Event.
 Options:
   --check-only, --dry-run   Verify installed tools without making any system changes
   --no-prompt               Do not pause for interactive confirmation prompts
+  --agents <list>           AI agent CLIs to install: claude,opencode (default), claude, opencode, or none
+  --offline-kit <DIR>       Use the event USB kit ('${OFFLINE_KIT_FOLDER}' folder) for offline installs
+                            (found automatically next to this repo, in ~/Downloads, or on /Volumes/*)
   --bootstrap               Download & extract full repository ZIP before running
   --local-zip <FILE>        Bootstrap repository from a local .zip archive
   --zip-url <URL>           Override repository ZIP download URL
@@ -337,6 +402,24 @@ while (( $# > 0 )); do
       BOOTSTRAP_REQUESTED=1
       shift
       ;;
+    --agents)
+      if (( $# < 2 )); then
+        print "${C_RED}[ERROR] --agents requires a list such as claude,opencode or none.${C_RESET}" >&2
+        exit 2
+      fi
+      AGENTS_TO_INSTALL="$2"
+      FORWARD_ARGS+=("$1" "$2")
+      shift 2
+      ;;
+    --offline-kit)
+      if (( $# < 2 )); then
+        print "${C_RED}[ERROR] --offline-kit requires the path of the '${OFFLINE_KIT_FOLDER}' folder.${C_RESET}" >&2
+        exit 2
+      fi
+      OFFLINE_KIT_ARG="$2"
+      FORWARD_ARGS+=("$1" "$2")
+      shift 2
+      ;;
     --local-zip)
       if (( $# < 2 )); then
         print "${C_RED}[ERROR] --local-zip requires a file path argument.${C_RESET}" >&2
@@ -436,6 +519,113 @@ refresh_session_path() {
       export PATH="${PATH}:${npm_prefix}/bin"
     fi
   fi
+}
+
+# -----------------------------------------------------------------------------
+# Offline USB Kit & npm Helpers
+# -----------------------------------------------------------------------------
+detect_offline_kit() {
+  # Finds the macOS folder of the event USB kit ('Beyond the Prompt/macOS'), given either
+  # the kit folder or its macOS folder, next to this repo, in ~/Downloads, or on a USB volume.
+  local -a roots
+  roots=()
+  [[ -n "$OFFLINE_KIT_ARG" ]] && roots+=("$OFFLINE_KIT_ARG")
+  roots+=("${SCRIPT_DIR}/.." "${SCRIPT_DIR}/../.." "${HOME}/Downloads" "${HOME}/Downloads/${OFFLINE_KIT_FOLDER}" "${HOME}/Desktop/${OFFLINE_KIT_FOLDER}")
+  local vol
+  for vol in /Volumes/*(N/); do
+    roots+=("${vol}/${OFFLINE_KIT_FOLDER}")
+  done
+
+  local root candidate
+  for root in "${roots[@]}"; do
+    for candidate in "${root}/macOS" "${root}"; do
+      if [[ "${candidate:A:t}" == "macOS" ]] && \
+         { [[ -f "${candidate}/npm-offline-cache.zip" ]] || [[ -d "${candidate}/npm-offline-cache/_cacache" ]]; }; then
+        OFFLINE_OS_DIR="${candidate:A}"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+prepare_offline_npm_cache() {
+  # Makes the kit's npm cache usable: an extracted local copy is used in place, a USB
+  # copy is extracted once to ~/.cache (npm writes to its cache, so never use the stick).
+  if [[ -n "$OFFLINE_NPM_CACHE" ]]; then
+    return 0
+  fi
+  if [[ -z "$OFFLINE_OS_DIR" ]]; then
+    return 1
+  fi
+
+  local extracted="${OFFLINE_OS_DIR}/npm-offline-cache"
+  if [[ -d "${extracted}/_cacache" ]] && [[ "$extracted" != /Volumes/* ]] && [[ -w "$extracted" ]]; then
+    OFFLINE_NPM_CACHE="$extracted"
+  else
+    local kit_zip="${OFFLINE_OS_DIR}/npm-offline-cache.zip"
+    local dest="${HOME}/.cache/beyond-the-prompt"
+    [[ -f "$kit_zip" ]] || return 1
+    if [[ ! -d "${dest}/npm-offline-cache/_cacache" ]]; then
+      print_info "Extracting the USB kit's offline npm cache to ~/.cache/beyond-the-prompt (one time, about a minute)..."
+      mkdir -p "$dest"
+      if ! unzip -q -o "$kit_zip" -d "$dest"; then
+        print_info "Could not extract ${kit_zip}; npm will use the internet instead."
+        return 1
+      fi
+    fi
+    OFFLINE_NPM_CACHE="${dest}/npm-offline-cache"
+  fi
+
+  # --prefer-offline uses the kit for everything it holds and the internet only for the rest;
+  # --offline when there is no internet at all. npm checks every cached tarball's integrity hash.
+  if [[ "$NETWORK_AVAILABLE" == "1" ]]; then
+    NPM_CACHE_ARGS=(--prefer-offline --cache "$OFFLINE_NPM_CACHE")
+  else
+    NPM_CACHE_ARGS=(--offline --cache "$OFFLINE_NPM_CACHE")
+  fi
+  return 0
+}
+
+npm_global_install() {
+  # Installs npm packages globally without sudo, using the USB kit's npm cache when present.
+  prepare_offline_npm_cache || true
+  if [[ -n "$OFFLINE_NPM_CACHE" ]]; then
+    print_info "Using the offline npm cache from the USB kit (${OFFLINE_NPM_CACHE/#${HOME}/~})."
+  fi
+
+  local npm_global_prefix
+  npm_global_prefix="$(npm prefix -g 2>/dev/null || echo "/usr/local")"
+
+  if [[ -w "${npm_global_prefix}/lib/node_modules" ]] || [[ -w "${npm_global_prefix}" ]]; then
+    print_info "Running: npm install -g $*"
+    npm install -g --no-audit --no-fund "${NPM_CACHE_ARGS[@]}" "$@"
+    return $?
+  fi
+
+  # Prefer writable per-user ~/.npm-global so sudo is never required
+  local user_npm_prefix="${ONBOARD_USER_NPM_PREFIX:-${HOME}/.npm-global}"
+  local user_bin_dir="${ONBOARD_USER_BIN_DIR:-${HOME}/.local/bin}"
+  print_info "Global npm prefix (${npm_global_prefix}) requires administrator permissions."
+  print_info "Installing per-user into '${user_npm_prefix}' to avoid requiring sudo: $*"
+  mkdir -p "${user_npm_prefix}/bin" "${user_npm_prefix}/lib" "$user_bin_dir"
+  npm install -g --no-audit --no-fund "${NPM_CACHE_ARGS[@]}" --prefix "${user_npm_prefix}" "$@"
+  local install_rc=$?
+  local bin_path
+  for bin_path in "${user_npm_prefix}/bin/"*(N); do
+    ln -sf "$bin_path" "${user_bin_dir}/${bin_path:t}"
+  done
+  NEW_TERMINAL_ADVISED=1
+  print_info "Note: To use these commands in future terminal sessions, ensure '~/.local/bin' is on your PATH."
+  return $install_rc
+}
+
+kit_sha256_for() {
+  # Prints the expected SHA-256 of a kit file (path relative to the kit root) from SHA256SUMS.txt
+  local rel_path="$1"
+  local sums_file="${OFFLINE_OS_DIR:h}/SHA256SUMS.txt"
+  [[ -f "$sums_file" ]] || return 1
+  tr -d '\r' < "$sums_file" | awk -v f="$rel_path" '$2 == f {print tolower($1)}' | head -n 1
 }
 
 # -----------------------------------------------------------------------------
@@ -561,6 +751,18 @@ detect_environment() {
     print_info "Detect Orca CLI : Found ($(command -v orca))"
   else
     print_info "Detect Orca CLI : Not found"
+  fi
+
+  if command -v gh >/dev/null 2>&1; then
+    print_info "Detect GitHub CLI: Found ($(command -v gh))"
+  else
+    print_info "Detect GitHub CLI: Not found"
+  fi
+
+  if detect_offline_kit; then
+    print_info "Detect USB kit  : Found (${OFFLINE_OS_DIR}) — used for offline npm packages and jq"
+  else
+    print_info "Detect USB kit  : Not found (installs will use the internet)"
   fi
 }
 
@@ -975,19 +1177,20 @@ check_and_setup_zepher() {
     return 0
   fi
 
-  if [[ "$NETWORK_AVAILABLE" != "1" ]]; then
+  prepare_offline_npm_cache || true
+  if [[ "$NETWORK_AVAILABLE" != "1" ]] && [[ -z "$OFFLINE_NPM_CACHE" ]]; then
     STATUS_ZEPHER="FAIL"
     DETAIL_ZEPHER="Missing and cannot verify/install while offline"
     print_fail "Cannot verify or install ${ZEPHER_NPM_PACKAGE} without internet access."
-    add_recovery_note "Zepher CLI: Connect to the internet and run 'npm install -g ${ZEPHER_NPM_PACKAGE}'."
+    add_recovery_note "Zepher CLI: Connect to the internet (or plug in the USB kit) and re-run ./setup.zsh."
     return 0
   fi
 
-  # Verify exact package identity on npm before installing
+  # Verify exact package identity on npm (or in the USB kit's npm cache) before installing
   print_info "Verifying package identity for '${ZEPHER_NPM_PACKAGE}' against ${ZEPHER_NPM_URL}..."
   local pkg_name_remote pkg_bin_remote
-  pkg_name_remote="$(npm view "${ZEPHER_NPM_PACKAGE}" name 2>/dev/null | tr -d '[:space:]' || true)"
-  pkg_bin_remote="$(npm view "${ZEPHER_NPM_PACKAGE}" "bin.${ZEPHER_BIN_NAME}" 2>/dev/null | tr -d '[:space:]' || true)"
+  pkg_name_remote="$(npm view "${NPM_CACHE_ARGS[@]}" "${ZEPHER_NPM_PACKAGE}" name 2>/dev/null | tr -d '[:space:]' || true)"
+  pkg_bin_remote="$(npm view "${NPM_CACHE_ARGS[@]}" "${ZEPHER_NPM_PACKAGE}" "bin.${ZEPHER_BIN_NAME}" 2>/dev/null | tr -d '[:space:]' || true)"
 
   if [[ "$pkg_name_remote" != "${ZEPHER_NPM_PACKAGE}" ]] || [[ -z "$pkg_bin_remote" ]]; then
     STATUS_ZEPHER="FAIL"
@@ -1000,29 +1203,9 @@ check_and_setup_zepher() {
 
   print_info "Verified package '${pkg_name_remote}' (executable '${ZEPHER_BIN_NAME}' -> '${pkg_bin_remote}')."
 
-  # Prefer writable npm prefix or per-user ~/.npm-global so sudo is never required
-  local npm_global_prefix
-  npm_global_prefix="$(npm prefix -g 2>/dev/null || echo "/usr/local")"
   local install_cmd_rc=1
-
-  if [[ -w "${npm_global_prefix}/lib/node_modules" ]] || [[ -w "${npm_global_prefix}" ]]; then
-    print_info "Running: npm install -g ${ZEPHER_NPM_PACKAGE}"
-    npm install -g "${ZEPHER_NPM_PACKAGE}"
-    install_cmd_rc=$?
-  else
-    local user_npm_prefix="${ONBOARD_USER_NPM_PREFIX:-${HOME}/.npm-global}"
-    local user_bin_dir="${ONBOARD_USER_BIN_DIR:-${HOME}/.local/bin}"
-    print_info "Global npm prefix (${npm_global_prefix}) requires administrator permissions."
-    print_info "Installing per-user into '${user_npm_prefix}' to avoid requiring sudo..."
-    mkdir -p "${user_npm_prefix}/bin" "${user_npm_prefix}/lib" "$user_bin_dir"
-    npm install -g --prefix "${user_npm_prefix}" "${ZEPHER_NPM_PACKAGE}"
-    install_cmd_rc=$?
-    if [[ -x "${user_npm_prefix}/bin/${ZEPHER_BIN_NAME}" ]]; then
-      ln -sf "${user_npm_prefix}/bin/${ZEPHER_BIN_NAME}" "${user_bin_dir}/${ZEPHER_BIN_NAME}"
-    fi
-    NEW_TERMINAL_ADVISED=1
-    print_info "Note: To use '${ZEPHER_BIN_NAME}' in future terminal sessions, ensure '${user_npm_prefix}/bin' or '~/.local/bin' is on your PATH."
-  fi
+  npm_global_install "${ZEPHER_NPM_PACKAGE}"
+  install_cmd_rc=$?
 
   refresh_session_path
 
@@ -1294,6 +1477,823 @@ check_and_setup_orca_cli() {
 }
 
 # -----------------------------------------------------------------------------
+# 6. GitHub CLI (Homebrew or Official Verified Standalone Per-User Archive)
+# -----------------------------------------------------------------------------
+verify_gh_binary() {
+  command -v gh >/dev/null 2>&1 && gh --version >/dev/null 2>&1
+}
+
+install_gh_standalone_macos() {
+  local arch_suffix="amd64"
+  if [[ "$IS_APPLE_SILICON" == "1" ]]; then
+    arch_suffix="arm64"
+  fi
+
+  # Resolve the version through the releases/latest redirect instead of the GitHub API,
+  # so a room full of laptops behind one IP does not hit the unauthenticated API limit.
+  print_info "Resolving the latest official GitHub CLI release from: ${GH_RELEASES_LATEST_URL}"
+  local tag_url gh_ver
+  tag_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --retry 2 --connect-timeout 10 "${GH_RELEASES_LATEST_URL}" 2>/dev/null || true)"
+  gh_ver="${tag_url##*/tag/v}"
+  if [[ ! "$gh_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    print_fail "Could not determine the latest GitHub CLI version (resolved URL: '${tag_url:-none}')."
+    return 1
+  fi
+
+  local base_url="${GH_RELEASES_DOWNLOAD_BASE_URL}/v${gh_ver}"
+  local archive_name="gh_${gh_ver}_macOS_${arch_suffix}.zip"
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/gh-standalone.XXXXXX")"
+  local checksums_file="${tmp_dir}/checksums.txt"
+  local archive_path="${tmp_dir}/${archive_name}"
+
+  print_info "Fetching official checksum manifest: ${base_url}/gh_${gh_ver}_checksums.txt"
+  if ! curl -fsSL --retry 2 --connect-timeout 10 -o "$checksums_file" "${base_url}/gh_${gh_ver}_checksums.txt"; then
+    rm -rf "$tmp_dir"
+    print_fail "Failed to download the official GitHub CLI checksum manifest."
+    return 1
+  fi
+
+  local expected_sha256
+  expected_sha256="$(awk -v f="$archive_name" '$2 == f {print tolower($1)}' "$checksums_file" | head -n 1)"
+  if [[ -z "$expected_sha256" ]]; then
+    rm -rf "$tmp_dir"
+    print_fail "Could not locate ${archive_name} in the GitHub CLI checksum manifest."
+    return 1
+  fi
+
+  print_info "Downloading official GitHub CLI archive: ${base_url}/${archive_name}"
+  if ! curl -fL --retry 2 --connect-timeout 15 -o "$archive_path" "${base_url}/${archive_name}"; then
+    rm -rf "$tmp_dir"
+    print_fail "Failed to download ${archive_name}."
+    return 1
+  fi
+
+  local actual_sha256
+  actual_sha256="$(shasum -a 256 "$archive_path" 2>/dev/null | awk '{print tolower($1)}' || true)"
+  if [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    rm -rf "$tmp_dir"
+    print_fail "SHA-256 checksum mismatch for ${archive_name}! Aborting installation."
+    print_info "Expected: ${expected_sha256}"
+    print_info "Actual  : ${actual_sha256:-unknown}"
+    return 1
+  fi
+  print_pass "Verified official SHA-256 checksum (${actual_sha256})."
+
+  if ! unzip -q "$archive_path" -d "${tmp_dir}/extracted"; then
+    rm -rf "$tmp_dir"
+    print_fail "Failed to extract ${archive_name}."
+    return 1
+  fi
+
+  local extracted_dir="${tmp_dir}/extracted/gh_${gh_ver}_macOS_${arch_suffix}"
+  if [[ ! -x "${extracted_dir}/bin/gh" ]]; then
+    rm -rf "$tmp_dir"
+    print_fail "The 'gh' executable was not found inside ${archive_name}."
+    return 1
+  fi
+
+  local install_root="${ONBOARD_USER_GH_DIR:-${HOME}/.local/gh}"
+  local user_bin_dir="${ONBOARD_USER_BIN_DIR:-${HOME}/.local/bin}"
+  print_info "Installing GitHub CLI per-user into '${install_root}' (no administrator/sudo required)..."
+  mkdir -p "$install_root" "$user_bin_dir"
+  if ! ditto "$extracted_dir" "$install_root"; then
+    rm -rf "$tmp_dir"
+    print_fail "Failed to copy GitHub CLI into ${install_root}."
+    return 1
+  fi
+  rm -rf "$tmp_dir"
+
+  ln -sf "${install_root}/bin/gh" "${user_bin_dir}/gh"
+  if [[ ":${PATH}:" != *":${user_bin_dir}:"* ]]; then
+    export PATH="${PATH}:${user_bin_dir}"
+  fi
+
+  NEW_TERMINAL_ADVISED=1
+  print_info "Note for future terminal sessions: Ensure '${user_bin_dir}' is in your PATH:"
+  print_info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+  return 0
+}
+
+check_and_setup_gh() {
+  print_step "Step 7: Checking GitHub CLI ('gh')"
+
+  refresh_session_path
+
+  if verify_gh_binary; then
+    local gh_ver
+    gh_ver="$(gh --version 2>/dev/null | head -n 1)"
+    STATUS_GH="SKIPPED"
+    DETAIL_GH="Already installed (${gh_ver})"
+    print_skip "GitHub CLI is already installed: ${gh_ver} ($(command -v gh))"
+    return 0
+  fi
+
+  print_info "GitHub CLI ('gh') was not found on PATH."
+
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    STATUS_GH="FAIL"
+    DETAIL_GH="Missing (not installed; ran with --check-only)"
+    print_fail "GitHub CLI is not installed."
+    add_recovery_note "GitHub CLI: Re-run './setup.zsh' without --check-only, or install from ${GH_CLI_URL}."
+    return 0
+  fi
+
+  if [[ "$NETWORK_AVAILABLE" != "1" ]]; then
+    STATUS_GH="FAIL"
+    DETAIL_GH="Missing and cannot install while offline"
+    print_fail "Cannot install GitHub CLI because network connectivity is unavailable."
+    add_recovery_note "GitHub CLI: Connect to the internet and re-run ./setup.zsh, or install from ${GH_CLI_URL}."
+    return 0
+  fi
+
+  # Route A: Homebrew is available
+  if [[ "$HAS_HOMEBREW" == "1" ]]; then
+    print_info "Installing GitHub CLI via Homebrew ('brew install gh')..."
+    if brew install gh; then
+      refresh_session_path
+      if verify_gh_binary; then
+        local brew_gh_ver
+        brew_gh_ver="$(gh --version 2>/dev/null | head -n 1)"
+        STATUS_GH="PASS"
+        DETAIL_GH="Installed via Homebrew (${brew_gh_ver})"
+        print_pass "GitHub CLI installed and verified: ${brew_gh_ver}"
+        return 0
+      fi
+    fi
+    print_info "Homebrew installation did not complete; attempting the official standalone archive..."
+  fi
+
+  # Route B: Official verified standalone per-user archive from GitHub Releases
+  if install_gh_standalone_macos; then
+    refresh_session_path
+    if verify_gh_binary; then
+      local std_gh_ver
+      std_gh_ver="$(gh --version 2>/dev/null | head -n 1)"
+      STATUS_GH="PASS"
+      DETAIL_GH="Installed per-user standalone (${std_gh_ver})"
+      print_pass "GitHub CLI installed and verified: ${std_gh_ver}"
+      return 0
+    fi
+  fi
+
+  STATUS_GH="FAIL"
+  DETAIL_GH="Automatic installation failed"
+  print_fail "Could not automatically install and verify GitHub CLI."
+  add_recovery_note "GitHub CLI: Download the macOS installer from ${GH_CLI_URL}, open a new terminal, and re-run ./setup.zsh."
+}
+
+# -----------------------------------------------------------------------------
+# 7. GitHub Authentication over SSH (gh login + SSH key + git identity)
+# -----------------------------------------------------------------------------
+github_ssh_probe() {
+  # Prints one of: ok:<login> | denied | hostkey | unreachable
+  # 'ssh -T git@github.com' exits 1 even on success, so classify by its message.
+  local out
+  out="$(ssh -T -o ConnectTimeout=10 -o StrictHostKeyChecking=yes "$@" git@github.com 2>&1 </dev/null || true)"
+  if [[ "$out" == *"successfully authenticated"* ]]; then
+    local login="${out#*Hi }"
+    print "ok:${login%%\!*}"
+  elif [[ "$out" == *"Host key verification failed"* ]] || [[ "$out" == *"REMOTE HOST IDENTIFICATION HAS CHANGED"* ]]; then
+    print "hostkey"
+  elif [[ "$out" == *"Permission denied"* ]]; then
+    print "denied"
+  else
+    print "unreachable"
+  fi
+}
+
+ensure_github_known_hosts() {
+  # Trust GitHub's host keys as published by the GitHub API over authenticated HTTPS,
+  # instead of accepting whatever key answers on first connect.
+  local force="$1"
+  local known_hosts="${HOME}/.ssh/known_hosts"
+  local keys
+  keys="$(gh api meta --jq '.ssh_keys[]' 2>/dev/null || true)"
+  if [[ -z "$keys" ]]; then
+    print_info "Could not fetch GitHub's published SSH host keys ('gh api meta')."
+    return 1
+  fi
+
+  mkdir -p "${HOME}/.ssh"
+  chmod 700 "${HOME}/.ssh" 2>/dev/null || true
+  touch "$known_hosts"
+
+  local host key
+  for host in "github.com" "[ssh.github.com]:443"; do
+    if [[ "$force" == "1" ]]; then
+      ssh-keygen -R "$host" -f "$known_hosts" >/dev/null 2>&1 || true
+    fi
+    if ! ssh-keygen -F "$host" -f "$known_hosts" >/dev/null 2>&1; then
+      for key in "${(@f)keys}"; do
+        print -r -- "${host} ${key}" >> "$known_hosts"
+      done
+      print_info "Added GitHub's official SSH host keys for ${host} to ~/.ssh/known_hosts."
+    fi
+  done
+  return 0
+}
+
+write_github_ssh_config() {
+  # Prepends one marked 'Host github.com' block (replacing an older copy of it) so it
+  # takes precedence over any later github.com entries in ~/.ssh/config.
+  local use_port_443="$1"
+  local ssh_config="${HOME}/.ssh/config"
+  local tmp_config
+  tmp_config="$(mktemp "${HOME}/.ssh/config.XXXXXX")" || return 1
+
+  {
+    print -r -- "${SSH_CONFIG_BLOCK_BEGIN}"
+    print -r -- "Host github.com"
+    if [[ "$use_port_443" == "1" ]]; then
+      print -r -- "  HostName ssh.github.com"
+      print -r -- "  Port 443"
+    fi
+    print -r -- "  User git"
+    print -r -- "  IdentityFile ${SSH_KEY_PATH/#${HOME}/~}"
+    print -r -- "  AddKeysToAgent yes"
+    print -r -- "  IgnoreUnknown UseKeychain"
+    print -r -- "  UseKeychain yes"
+    print -r -- "${SSH_CONFIG_BLOCK_END}"
+    print ""
+    if [[ -f "$ssh_config" ]]; then
+      awk -v b="${SSH_CONFIG_BLOCK_BEGIN}" -v e="${SSH_CONFIG_BLOCK_END}" \
+        '$0 == b {skip = 1; next} $0 == e {skip = 0; after = 1; next} after && $0 == "" {after = 0; next} {after = 0} !skip' "$ssh_config"
+    fi
+  } > "$tmp_config"
+
+  if [[ -f "$ssh_config" ]]; then
+    cp "$ssh_config" "${ssh_config}.bak-beyond-the-prompt"
+    print_info "Backed up ~/.ssh/config to ~/.ssh/config.bak-beyond-the-prompt"
+  fi
+  chmod 600 "$tmp_config"
+  mv "$tmp_config" "$ssh_config"
+  print_info "Updated the managed 'Host github.com' block at the top of ~/.ssh/config."
+}
+
+configure_git_identity_from_github() {
+  # Only fills in a missing global user.name / user.email; never replaces existing values.
+  local cur_name cur_email
+  cur_name="$(git config --global user.name 2>/dev/null || true)"
+  cur_email="$(git config --global user.email 2>/dev/null || true)"
+  if [[ -n "$cur_name" ]] && [[ -n "$cur_email" ]]; then
+    print_info "Git identity already set: ${cur_name} <${cur_email}>"
+    return 0
+  fi
+
+  local user_line gh_id gh_login gh_name
+  user_line="$(gh api user --jq '"\(.id)\t\(.login)\t\(.name // "")"' 2>/dev/null || true)"
+  IFS=$'\t' read -r gh_id gh_login gh_name <<< "$user_line"
+  if [[ -z "$gh_id" ]] || [[ -z "$gh_login" ]]; then
+    print_info "Could not read your GitHub profile to set the Git identity; set it with 'git config --global user.name/user.email'."
+    return 0
+  fi
+
+  if [[ -z "$cur_name" ]]; then
+    git config --global user.name "${gh_name:-$gh_login}"
+    print_info "Set Git user.name to '${gh_name:-$gh_login}'."
+  fi
+  if [[ -z "$cur_email" ]]; then
+    git config --global user.email "${gh_id}+${gh_login}@users.noreply.github.com"
+    print_info "Set Git user.email to your GitHub no-reply address (${gh_id}+${gh_login}@users.noreply.github.com)."
+  fi
+}
+
+check_and_setup_github_ssh() {
+  print_step "Step 8: Checking GitHub authentication over SSH (gh login + SSH key)"
+
+  if [[ "$STATUS_GH" != "PASS" ]] && [[ "$STATUS_GH" != "SKIPPED" ]]; then
+    STATUS_GH_SSH="FAIL"
+    DETAIL_GH_SSH="Blocked because GitHub CLI is not ready"
+    print_fail "Cannot configure GitHub authentication until the GitHub CLI ('gh') is installed."
+    add_recovery_note "GitHub over SSH: Install GitHub CLI first (${GH_CLI_URL}), then re-run ./setup.zsh."
+    return 0
+  fi
+
+  if ! command -v ssh >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; then
+    STATUS_GH_SSH="FAIL"
+    DETAIL_GH_SSH="OpenSSH ('ssh', 'ssh-keygen') not found"
+    print_fail "OpenSSH client tools were not found on PATH."
+    add_recovery_note "GitHub over SSH: macOS ships OpenSSH in /usr/bin; make sure /usr/bin is on your PATH and re-run ./setup.zsh."
+    return 0
+  fi
+
+  # Current state
+  local auth_out="" gh_logged_in=0 gh_protocol="" probe=""
+  if auth_out="$(gh auth status --hostname github.com 2>&1)"; then
+    gh_logged_in=1
+  fi
+  gh_protocol="$(gh config get git_protocol --host github.com 2>/dev/null || true)"
+  probe="$(github_ssh_probe -o BatchMode=yes)"
+
+  if (( gh_logged_in )) && [[ "$auth_out" == *"'project'"* ]] && [[ "$gh_protocol" == "ssh" ]] && [[ "$probe" == ok:* ]]; then
+    STATUS_GH_SSH="SKIPPED"
+    DETAIL_GH_SSH="Already set up (gh + SSH as ${probe#ok:})"
+    print_skip "gh is logged in, uses SSH for git, and 'ssh -T git@github.com' authenticates as ${probe#ok:}."
+    if [[ "$CHECK_ONLY" != "1" ]]; then
+      configure_git_identity_from_github
+    fi
+    return 0
+  fi
+
+  local missing=""
+  (( gh_logged_in )) || missing+="gh not logged in; "
+  if (( gh_logged_in )) && [[ "$auth_out" != *"'project'"* ]]; then missing+="token lacks 'project' scope; "; fi
+  [[ "$gh_protocol" == "ssh" ]] || missing+="gh git protocol is '${gh_protocol:-https}'; "
+  [[ "$probe" == ok:* ]] || missing+="SSH to GitHub: ${probe}; "
+  print_info "Current state: ${missing%; }"
+
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    STATUS_GH_SSH="FAIL"
+    DETAIL_GH_SSH="Not configured (${missing%; })"
+    print_fail "GitHub authentication over SSH is not fully configured."
+    add_recovery_note "GitHub over SSH: Re-run './setup.zsh' without --check-only to sign in and set up your SSH key."
+    return 0
+  fi
+
+  if [[ "$NETWORK_AVAILABLE" != "1" ]]; then
+    STATUS_GH_SSH="FAIL"
+    DETAIL_GH_SSH="Cannot sign in to GitHub while offline"
+    print_fail "GitHub sign-in needs internet access."
+    add_recovery_note "GitHub over SSH: Connect to the internet and re-run ./setup.zsh."
+    return 0
+  fi
+
+  if [[ -n "${GH_TOKEN:-}" ]] || [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    STATUS_GH_SSH="ACTION REQUIRED"
+    DETAIL_GH_SSH="GH_TOKEN / GITHUB_TOKEN is set and overrides gh login"
+    print_action "A GH_TOKEN or GITHUB_TOKEN environment variable is set; gh uses it instead of a normal login."
+    add_recovery_note "GitHub over SSH: Run 'unset GH_TOKEN GITHUB_TOKEN' (and remove them from your shell profile if exported there), then re-run ./setup.zsh."
+    return 0
+  fi
+
+  if [[ "$NO_PROMPT" == "1" ]] || [[ ! -t 0 ]]; then
+    STATUS_GH_SSH="ACTION REQUIRED"
+    DETAIL_GH_SSH="Interactive browser sign-in required"
+    print_action "GitHub sign-in needs an interactive terminal and a browser."
+    add_recovery_note "GitHub over SSH: Re-run './setup.zsh' in a normal Terminal window (without --no-prompt) to sign in to GitHub."
+    return 0
+  fi
+
+  # 1. Sign in to gh (browser device flow), or add missing scopes to an existing login
+  local needed_scopes="project"
+  [[ "$probe" == ok:* ]] || needed_scopes="${GH_AUTH_SCOPES}"
+  if (( ! gh_logged_in )); then
+    print_info "Signing in to GitHub. Copy the one-time code printed below, press Enter, and approve it in your browser."
+    if ! gh auth login --hostname github.com --git-protocol ssh --web --skip-ssh-key --scopes "${GH_AUTH_SCOPES}"; then
+      STATUS_GH_SSH="FAIL"
+      DETAIL_GH_SSH="GitHub sign-in did not complete"
+      print_fail "'gh auth login' did not complete."
+      add_recovery_note "GitHub over SSH: Run 'gh auth login --git-protocol ssh --web --scopes ${GH_AUTH_SCOPES}' manually (or enter the code at https://github.com/login/device), then re-run ./setup.zsh."
+      return 0
+    fi
+  else
+    local scope_missing=0 scope
+    for scope in "${(@s/,/)needed_scopes}"; do
+      [[ "$auth_out" == *"'${scope}'"* ]] || scope_missing=1
+    done
+    if (( scope_missing )); then
+      print_info "Adding token scopes '${needed_scopes}' to your existing gh login (approve it in your browser)..."
+      if ! gh auth refresh --hostname github.com --scopes "${needed_scopes}"; then
+        STATUS_GH_SSH="FAIL"
+        DETAIL_GH_SSH="Could not add required token scopes (${needed_scopes})"
+        print_fail "'gh auth refresh' did not complete."
+        add_recovery_note "GitHub over SSH: Run 'gh auth refresh --scopes ${needed_scopes}', then re-run ./setup.zsh."
+        return 0
+      fi
+    fi
+  fi
+  gh config set git_protocol ssh --host github.com >/dev/null 2>&1 || true
+
+  local gh_login
+  gh_login="$(gh api user --jq .login 2>/dev/null || true)"
+  print_pass "gh is signed in${gh_login:+ as ${gh_login}} and set to use SSH for git."
+
+  # 2. SSH key (an existing key is never overwritten)
+  local pub_path="${SSH_KEY_PATH}.pub"
+  if [[ ! -f "$SSH_KEY_PATH" ]]; then
+    mkdir -p "${SSH_KEY_PATH:h}"
+    chmod 700 "${SSH_KEY_PATH:h}" 2>/dev/null || true
+    print_info "Creating a new ed25519 SSH key at ${SSH_KEY_PATH/#${HOME}/~}."
+    print_info "Tip: a passphrase is optional. If you set one, it is saved in your macOS Keychain."
+    if ! ssh-keygen -t ed25519 -C "${gh_login:-github}@beyond-the-prompt" -f "$SSH_KEY_PATH"; then
+      STATUS_GH_SSH="FAIL"
+      DETAIL_GH_SSH="SSH key generation failed"
+      print_fail "ssh-keygen did not create a key."
+      add_recovery_note "GitHub over SSH: Run 'ssh-keygen -t ed25519' manually, then re-run ./setup.zsh."
+      return 0
+    fi
+  else
+    print_info "Using existing SSH key: ${SSH_KEY_PATH/#${HOME}/~}"
+    if [[ ! -f "$pub_path" ]]; then
+      ssh-keygen -y -f "$SSH_KEY_PATH" > "$pub_path" 2>/dev/null || true
+    fi
+  fi
+
+  if [[ ! -s "$pub_path" ]]; then
+    STATUS_GH_SSH="FAIL"
+    DETAIL_GH_SSH="Public key ${pub_path/#${HOME}/~} is missing"
+    print_fail "Could not find or recreate the public key ${pub_path}."
+    add_recovery_note "GitHub over SSH: Recreate it with 'ssh-keygen -y -f ${SSH_KEY_PATH} > ${pub_path}', then re-run ./setup.zsh."
+    return 0
+  fi
+
+  # Keep earlier choices: a previous run may have switched github.com to port 443
+  local use_port_443=0
+  if [[ -f "${HOME}/.ssh/config" ]] && \
+     awk -v b="${SSH_CONFIG_BLOCK_BEGIN}" -v e="${SSH_CONFIG_BLOCK_END}" \
+       '$0 == b {in_block = 1} $0 == e {in_block = 0} in_block && /Port 443/ {found = 1} END {exit !found}' "${HOME}/.ssh/config"; then
+    use_port_443=1
+  fi
+
+  if ! ssh-keygen -y -P "" -f "$SSH_KEY_PATH" >/dev/null 2>&1; then
+    print_info "Your key has a passphrase; adding it to the macOS Keychain so git does not ask every time..."
+    ssh-add --apple-use-keychain "$SSH_KEY_PATH" 2>/dev/null || ssh-add "$SSH_KEY_PATH" || true
+    write_github_ssh_config "$use_port_443"
+  fi
+
+  # 3. Trust GitHub's host keys, then find a working route (port 22, else 443)
+  ensure_github_known_hosts 0
+  probe="$(github_ssh_probe -o BatchMode=yes)"
+  if [[ "$probe" == "hostkey" ]]; then
+    print_info "Your known_hosts has an outdated GitHub host key; replacing it with GitHub's current keys..."
+    ensure_github_known_hosts 1
+    probe="$(github_ssh_probe -o BatchMode=yes)"
+  fi
+  if [[ "$probe" == "unreachable" ]]; then
+    local probe_443
+    probe_443="$(github_ssh_probe -o BatchMode=yes -o HostName=ssh.github.com -o Port=443)"
+    if [[ "$probe_443" != "unreachable" ]]; then
+      print_info "SSH port 22 is blocked on this network; switching github.com to ssh.github.com port 443."
+      use_port_443=1
+      write_github_ssh_config "$use_port_443"
+      probe="$(github_ssh_probe -o BatchMode=yes)"
+    fi
+  fi
+
+  # 4. Upload the public key if GitHub does not recognise it yet
+  if [[ "$probe" == "denied" ]]; then
+    local key_title="beyond-the-prompt $(scutil --get ComputerName 2>/dev/null || hostname -s 2>/dev/null || echo mac)"
+    print_info "Uploading ${pub_path/#${HOME}/~} to your GitHub account as '${key_title}'..."
+    gh ssh-key add "$pub_path" --title "$key_title" --type authentication || true
+    probe="$(github_ssh_probe -o BatchMode=yes)"
+  fi
+
+  if [[ "$probe" == ok:* ]]; then
+    local ssh_login="${probe#ok:}"
+    if [[ -n "$gh_login" ]] && [[ "$ssh_login" != "$gh_login" ]]; then
+      STATUS_GH_SSH="ACTION REQUIRED"
+      DETAIL_GH_SSH="SSH key belongs to '${ssh_login}', but gh is signed in as '${gh_login}'"
+      print_action "Your SSH key authenticates as '${ssh_login}', but gh is signed in as '${gh_login}'."
+      add_recovery_note "GitHub over SSH: Use one GitHub account for both. Either 'gh auth login' as ${ssh_login}, or set ONBOARD_SSH_KEY_PATH to a new key path (e.g. ~/.ssh/id_ed25519_${gh_login}) and re-run ./setup.zsh."
+      return 0
+    fi
+    STATUS_GH_SSH="PASS"
+    DETAIL_GH_SSH="Signed in as ${ssh_login}; git uses SSH$([[ "$use_port_443" == "1" ]] && print " (port 443)")"
+    print_pass "'ssh -T git@github.com' authenticates as ${ssh_login}."
+    configure_git_identity_from_github
+    return 0
+  fi
+
+  STATUS_GH_SSH="FAIL"
+  case "$probe" in
+    unreachable)
+      DETAIL_GH_SSH="GitHub SSH unreachable on ports 22 and 443"
+      print_fail "Could not reach GitHub over SSH on port 22 or 443 (network or firewall)."
+      add_recovery_note "GitHub over SSH: This network blocks SSH. Try another network or hotspot, then re-run ./setup.zsh (see ${GH_SSH_DOCS_URL})."
+      ;;
+    hostkey)
+      DETAIL_GH_SSH="GitHub host key could not be verified"
+      print_fail "GitHub's SSH host key could not be verified."
+      add_recovery_note "GitHub over SSH: Run 'ssh-keygen -R github.com', then re-run ./setup.zsh."
+      ;;
+    *)
+      DETAIL_GH_SSH="GitHub rejected the SSH key"
+      print_fail "GitHub did not accept ${pub_path/#${HOME}/~} (upload may have failed, or the key is on another account)."
+      add_recovery_note "GitHub over SSH: Run 'gh ssh-key add ${pub_path}' and check https://github.com/settings/keys, then re-run ./setup.zsh."
+      ;;
+  esac
+}
+
+# -----------------------------------------------------------------------------
+# 8. AI Coding Agent CLIs (Claude Code, OpenCode) via npm
+# -----------------------------------------------------------------------------
+agent_package_for() {
+  case "$1" in
+    claude) print "${CLAUDE_CODE_NPM_PACKAGE}" ;;
+    opencode) print "${OPENCODE_NPM_PACKAGE}" ;;
+    *) return 1 ;;
+  esac
+}
+
+verify_agent_binary() {
+  command -v "$1" >/dev/null 2>&1 && "$1" --version >/dev/null 2>&1
+}
+
+check_and_setup_agents() {
+  print_step "Step 9: Checking AI coding agent CLIs (${AGENTS_TO_INSTALL})"
+
+  if [[ "$AGENTS_TO_INSTALL" == "none" ]]; then
+    STATUS_AGENTS="SKIPPED"
+    DETAIL_AGENTS="Not requested (--agents none)"
+    print_skip "Agent installation skipped (--agents none)."
+    return 0
+  fi
+
+  refresh_session_path
+
+  local -a wanted missing_pkgs found_notes
+  wanted=()
+  missing_pkgs=()
+  found_notes=()
+  local agent pkg
+  for agent in "${(@s/,/)AGENTS_TO_INSTALL}"; do
+    if ! pkg="$(agent_package_for "$agent")"; then
+      print_action "Unknown agent '${agent}' ignored (use claude, opencode, or none)."
+      continue
+    fi
+    wanted+=("$agent")
+    if verify_agent_binary "$agent"; then
+      found_notes+=("${agent} $("$agent" --version 2>/dev/null | head -n 1)")
+    else
+      missing_pkgs+=("$pkg")
+    fi
+  done
+
+  if (( ${#wanted[@]} == 0 )); then
+    STATUS_AGENTS="FAIL"
+    DETAIL_AGENTS="No valid agent in --agents '${AGENTS_TO_INSTALL}'"
+    add_recovery_note "AI agents: Re-run with '--agents claude,opencode' (or claude / opencode / none)."
+    return 0
+  fi
+
+  if (( ${#missing_pkgs[@]} == 0 )); then
+    STATUS_AGENTS="SKIPPED"
+    DETAIL_AGENTS="Already installed (${(j:, :)found_notes})"
+    print_skip "Agent CLIs already installed: ${(j:, :)found_notes}"
+    add_agent_login_note "${wanted[@]}"
+    return 0
+  fi
+
+  print_info "Not installed yet: ${(j:, :)missing_pkgs}"
+
+  if [[ "$STATUS_NODE" != "PASS" ]] && [[ "$STATUS_NODE" != "SKIPPED" ]]; then
+    STATUS_AGENTS="FAIL"
+    DETAIL_AGENTS="Blocked because Node.js (>= v${MIN_NODE_MAJOR}) & npm are not ready"
+    print_fail "Cannot install agent CLIs until Node.js and npm are ready."
+    add_recovery_note "AI agents: Install Node.js first, then re-run ./setup.zsh."
+    return 0
+  fi
+
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    STATUS_AGENTS="FAIL"
+    DETAIL_AGENTS="Missing (${(j:, :)missing_pkgs}; ran with --check-only)"
+    print_fail "Agent CLIs not installed: ${(j:, :)missing_pkgs}"
+    add_recovery_note "AI agents: Re-run './setup.zsh' without --check-only to install ${(j:, :)missing_pkgs}."
+    return 0
+  fi
+
+  prepare_offline_npm_cache || true
+  if [[ "$NETWORK_AVAILABLE" != "1" ]] && [[ -z "$OFFLINE_NPM_CACHE" ]]; then
+    STATUS_AGENTS="FAIL"
+    DETAIL_AGENTS="Missing and cannot install while offline"
+    print_fail "Cannot install agent CLIs without internet access or the USB kit."
+    add_recovery_note "AI agents: Connect to the internet (or plug in the USB kit) and re-run ./setup.zsh."
+    return 0
+  fi
+
+  print_info "Installing ${(j:, :)missing_pkgs} (a few hundred MB from the internet; seconds from the USB kit)..."
+  # One npm run per agent (retried once), so a failing agent never blocks the other
+  for pkg in "${missing_pkgs[@]}"; do
+    npm_global_install "$pkg" || { print_info "Retrying ${pkg} once..."; npm_global_install "$pkg"; } || true
+  done
+  refresh_session_path
+
+  local -a ok_notes failed
+  ok_notes=()
+  failed=()
+  for agent in "${wanted[@]}"; do
+    if verify_agent_binary "$agent"; then
+      ok_notes+=("${agent} $("$agent" --version 2>/dev/null | head -n 1)")
+    else
+      failed+=("$agent")
+    fi
+  done
+
+  if (( ${#failed[@]} == 0 )); then
+    STATUS_AGENTS="PASS"
+    DETAIL_AGENTS="Installed (${(j:, :)ok_notes})"
+    print_pass "Agent CLIs installed and verified: ${(j:, :)ok_notes}"
+    add_agent_login_note "${wanted[@]}"
+    return 0
+  fi
+
+  STATUS_AGENTS="FAIL"
+  DETAIL_AGENTS="Could not install or verify: ${(j:, :)failed}"
+  print_fail "Could not install or verify: ${(j:, :)failed}"
+  add_recovery_note "AI agents: Run 'npm install -g ${(j: :)missing_pkgs}' in a new terminal and check the error (see ${CLAUDE_CODE_URL} / ${OPENCODE_URL})."
+}
+
+add_agent_login_note() {
+  # Signing in to an agent happens in the browser with the participant's own account.
+  local -a steps
+  steps=()
+  local agent
+  for agent in "$@"; do
+    case "$agent" in
+      claude) steps+=("run 'claude' once and sign in with your Claude account") ;;
+      opencode) steps+=("run 'opencode auth login' (or use its free models)") ;;
+    esac
+  done
+  if (( ${#steps[@]} > 0 )); then
+    add_recovery_note "Sign in to your AI agent before the event: ${(j:; :)steps}."
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# 9. jq (JSON tool used by the event's GitHub workflow skills)
+# -----------------------------------------------------------------------------
+install_jq_standalone_macos() {
+  local arch_suffix="amd64"
+  if [[ "$IS_APPLE_SILICON" == "1" ]]; then
+    arch_suffix="arm64"
+  fi
+  local asset="jq-macos-${arch_suffix}"
+  local user_bin_dir="${ONBOARD_USER_BIN_DIR:-${HOME}/.local/bin}"
+  local tmp_dir
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/jq-standalone.XXXXXX")"
+  local src="" expected_sha256=""
+
+  # Route 1: the USB kit, checked against the kit's SHA256SUMS.txt
+  if [[ -n "$OFFLINE_OS_DIR" ]] && [[ -f "${OFFLINE_OS_DIR}/jq/${asset}" ]]; then
+    expected_sha256="$(kit_sha256_for "macOS/jq/${asset}" || true)"
+    if [[ -n "$expected_sha256" ]]; then
+      src="${OFFLINE_OS_DIR}/jq/${asset}"
+      print_info "Using jq from the USB kit: ${src}"
+    fi
+  fi
+
+  # Route 2: the official GitHub release, checked against its sha256sum.txt
+  if [[ -z "$src" ]]; then
+    if [[ "$NETWORK_AVAILABLE" != "1" ]]; then
+      rm -rf "$tmp_dir"
+      return 1
+    fi
+    local tag_url jq_tag
+    tag_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' --retry 2 --connect-timeout 10 "${JQ_RELEASES_LATEST_URL}" 2>/dev/null || true)"
+    jq_tag="${tag_url##*/tag/}"
+    if [[ ! "$jq_tag" =~ ^jq-[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+      print_info "Could not resolve the latest jq release; using ${JQ_FALLBACK_TAG}."
+      jq_tag="$JQ_FALLBACK_TAG"
+    fi
+    local base_url="${JQ_RELEASES_DOWNLOAD_BASE_URL}/${jq_tag}"
+    print_info "Downloading official jq ${jq_tag#jq-} from ${base_url}/${asset}"
+    if ! curl -fsSL --retry 2 --connect-timeout 10 -o "${tmp_dir}/sha256sum.txt" "${base_url}/sha256sum.txt" || \
+       ! curl -fL --retry 2 --connect-timeout 15 -o "${tmp_dir}/${asset}" "${base_url}/${asset}"; then
+      rm -rf "$tmp_dir"
+      print_fail "Failed to download jq."
+      return 1
+    fi
+    expected_sha256="$(awk -v f="$asset" '$2 == f {print tolower($1)}' "${tmp_dir}/sha256sum.txt" | head -n 1)"
+    src="${tmp_dir}/${asset}"
+  fi
+
+  local actual_sha256
+  actual_sha256="$(shasum -a 256 "$src" 2>/dev/null | awk '{print tolower($1)}' || true)"
+  if [[ -z "$expected_sha256" ]] || [[ "$actual_sha256" != "$expected_sha256" ]]; then
+    rm -rf "$tmp_dir"
+    print_fail "SHA-256 checksum mismatch for ${asset}! Refusing to install."
+    print_info "Expected: ${expected_sha256:-unknown}"
+    print_info "Actual  : ${actual_sha256:-unknown}"
+    return 1
+  fi
+  print_pass "Verified official SHA-256 checksum (${actual_sha256})."
+
+  mkdir -p "$user_bin_dir"
+  cp "$src" "${user_bin_dir}/jq" && chmod 755 "${user_bin_dir}/jq"
+  local cp_rc=$?
+  rm -rf "$tmp_dir"
+  if [[ ":${PATH}:" != *":${user_bin_dir}:"* ]]; then
+    export PATH="${PATH}:${user_bin_dir}"
+  fi
+  NEW_TERMINAL_ADVISED=1
+  return $cp_rc
+}
+
+check_and_setup_jq() {
+  print_step "Step 10: Checking jq (used by the /new-issue, /start-task and /plan-project skills)"
+
+  refresh_session_path
+
+  if command -v jq >/dev/null 2>&1 && jq --version >/dev/null 2>&1; then
+    STATUS_JQ="SKIPPED"
+    DETAIL_JQ="Already installed ($(jq --version 2>/dev/null))"
+    print_skip "jq is already installed: $(jq --version 2>/dev/null) ($(command -v jq))"
+    return 0
+  fi
+
+  print_info "jq was not found on PATH."
+
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    STATUS_JQ="FAIL"
+    DETAIL_JQ="Missing (not installed; ran with --check-only)"
+    print_fail "jq is not installed."
+    add_recovery_note "jq: Re-run './setup.zsh' without --check-only, or install from ${JQ_URL}."
+    return 0
+  fi
+
+  if [[ "$HAS_HOMEBREW" == "1" ]] && [[ "$NETWORK_AVAILABLE" == "1" ]]; then
+    print_info "Installing jq via Homebrew ('brew install jq')..."
+    if brew install jq && command -v jq >/dev/null 2>&1; then
+      STATUS_JQ="PASS"
+      DETAIL_JQ="Installed via Homebrew ($(jq --version 2>/dev/null))"
+      print_pass "jq installed and verified: $(jq --version 2>/dev/null)"
+      return 0
+    fi
+    print_info "Homebrew installation did not complete; trying the official standalone binary..."
+  fi
+
+  if install_jq_standalone_macos && command -v jq >/dev/null 2>&1 && jq --version >/dev/null 2>&1; then
+    STATUS_JQ="PASS"
+    DETAIL_JQ="Installed per-user standalone ($(jq --version 2>/dev/null))"
+    print_pass "jq installed and verified: $(jq --version 2>/dev/null)"
+    return 0
+  fi
+
+  STATUS_JQ="FAIL"
+  DETAIL_JQ="Automatic installation failed"
+  print_fail "Could not install jq."
+  add_recovery_note "jq: Install with 'brew install jq', or download the macOS binary from ${JQ_URL} into ~/.local/bin/jq."
+}
+
+# -----------------------------------------------------------------------------
+# 10. Event Skills (copied into Claude Code's skills folder)
+# -----------------------------------------------------------------------------
+check_and_setup_skills() {
+  print_step "Step 11: Installing the event skills into Claude Code (${SKILLS_TARGET_DIR/#${HOME}/~})"
+
+  local src_dir="${SCRIPT_DIR}/skills"
+  if [[ ! -d "$src_dir" ]]; then
+    STATUS_SKILLS="FAIL"
+    DETAIL_SKILLS="skills/ folder not found next to setup.zsh"
+    print_fail "The repo's skills/ folder was not found at ${src_dir}."
+    add_recovery_note "Event skills: Re-download the repo (it contains skills/) and re-run ./setup.zsh."
+    return 0
+  fi
+
+  # A skill that already exists is never replaced, so personal or newer copies stay intact.
+  local -a to_copy present
+  to_copy=()
+  present=()
+  local skill_dir name
+  for skill_dir in "$src_dir"/*(N/); do
+    [[ -f "${skill_dir}/SKILL.md" ]] || continue
+    name="${skill_dir:t}"
+    if [[ -e "${SKILLS_TARGET_DIR}/${name}" ]]; then
+      present+=("$name")
+    else
+      to_copy+=("$name")
+    fi
+  done
+  local total=$(( ${#to_copy[@]} + ${#present[@]} ))
+
+  if (( ${#to_copy[@]} == 0 )); then
+    STATUS_SKILLS="SKIPPED"
+    DETAIL_SKILLS="All ${total} event skills already present"
+    print_skip "All ${total} event skills are already in ${SKILLS_TARGET_DIR/#${HOME}/~}."
+    return 0
+  fi
+
+  if [[ "$CHECK_ONLY" == "1" ]]; then
+    STATUS_SKILLS="FAIL"
+    DETAIL_SKILLS="${#to_copy[@]} of ${total} event skills not installed (ran with --check-only)"
+    print_fail "${#to_copy[@]} of ${total} event skills are not installed."
+    add_recovery_note "Event skills: Re-run './setup.zsh' without --check-only to copy them into ${SKILLS_TARGET_DIR/#${HOME}/~}."
+    return 0
+  fi
+
+  mkdir -p "$SKILLS_TARGET_DIR"
+  local -a copy_failed
+  copy_failed=()
+  for name in "${to_copy[@]}"; do
+    cp -R "${src_dir}/${name}" "${SKILLS_TARGET_DIR}/${name}" || copy_failed+=("$name")
+  done
+
+  if (( ${#copy_failed[@]} > 0 )); then
+    STATUS_SKILLS="FAIL"
+    DETAIL_SKILLS="Could not copy: ${(j:, :)copy_failed}"
+    print_fail "Could not copy skills: ${(j:, :)copy_failed}"
+    add_recovery_note "Event skills: Copy the folders from skills/ into ${SKILLS_TARGET_DIR/#${HOME}/~} by hand."
+    return 0
+  fi
+
+  STATUS_SKILLS="PASS"
+  DETAIL_SKILLS="Installed ${#to_copy[@]} skills (${#present[@]} already present, left unchanged)"
+  print_pass "Copied ${#to_copy[@]} event skills into ${SKILLS_TARGET_DIR/#${HOME}/~} (${#present[@]} already present were left unchanged)."
+  print_info "Restart Claude Code to pick them up. Try /new-issue or /start-task inside your team repo."
+}
+
+# -----------------------------------------------------------------------------
 # Final Summary & Readiness Report
 # -----------------------------------------------------------------------------
 format_status_badge() {
@@ -1326,6 +2326,11 @@ print_summary() {
   print "  3. Zepher CLI        $(format_status_badge "$STATUS_ZEPHER") ${DETAIL_ZEPHER}"
   print "  4. Orca Desktop App  $(format_status_badge "$STATUS_ORCA_APP") ${DETAIL_ORCA_APP}"
   print "  5. Orca CLI          $(format_status_badge "$STATUS_ORCA_CLI") ${DETAIL_ORCA_CLI}"
+  print "  6. GitHub CLI        $(format_status_badge "$STATUS_GH") ${DETAIL_GH}"
+  print "  7. GitHub over SSH   $(format_status_badge "$STATUS_GH_SSH") ${DETAIL_GH_SSH}"
+  print "  8. AI agent CLIs     $(format_status_badge "$STATUS_AGENTS") ${DETAIL_AGENTS}"
+  print "  9. jq                $(format_status_badge "$STATUS_JQ") ${DETAIL_JQ}"
+  print " 10. Event skills      $(format_status_badge "$STATUS_SKILLS") ${DETAIL_SKILLS}"
   print "${C_CYAN}-----------------------------------------------------------------------------${C_RESET}"
   print "  Status Legend:"
   print "    PASS            = Installed and verified during this run."
@@ -1344,7 +2349,7 @@ print_summary() {
   local fail_count=0
   local action_count=0
   local st
-  for st in "$STATUS_GIT" "$STATUS_NODE" "$STATUS_ZEPHER" "$STATUS_ORCA_APP" "$STATUS_ORCA_CLI"; do
+  for st in "$STATUS_GIT" "$STATUS_NODE" "$STATUS_ZEPHER" "$STATUS_ORCA_APP" "$STATUS_ORCA_CLI" "$STATUS_GH" "$STATUS_GH_SSH" "$STATUS_AGENTS" "$STATUS_JQ" "$STATUS_SKILLS"; do
     if [[ "$st" == "FAIL" ]]; then
       (( fail_count += 1 ))
     elif [[ "$st" == "ACTION REQUIRED" ]]; then
@@ -1369,6 +2374,8 @@ print_summary() {
     print "  - Orca Website   : ${ORCA_WEBSITE_URL}"
     print "  - Orca Install   : ${ORCA_INSTALL_DOCS_URL}"
     print "  - Orca CLI Docs  : ${ORCA_CLI_DOCS_URL}"
+    print "  - GitHub CLI     : ${GH_CLI_URL}"
+    print "  - GitHub SSH     : ${GH_SSH_DOCS_URL}"
   fi
 
   print ""
@@ -1407,6 +2414,11 @@ main() {
   check_and_setup_zepher
   check_and_setup_orca_app
   check_and_setup_orca_cli
+  check_and_setup_gh
+  check_and_setup_github_ssh
+  check_and_setup_agents
+  check_and_setup_jq
+  check_and_setup_skills
   print_summary
 }
 

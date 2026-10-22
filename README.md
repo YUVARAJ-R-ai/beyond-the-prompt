@@ -10,6 +10,7 @@ Welcome! This repository prepares your laptop for our hands-on AI development ev
 | :--- | :--- | :--- | :--- |
 | **macOS** (macOS 13 Ventura or newer recommended) | Apple Silicon (`arm64`) & Intel (`x86_64`) | `setup.zsh` | **Terminal** (Zsh) |
 | **Windows** (Windows 10 / Windows 11) | 64-bit (`x64` / `ARM64`) | `setup.bat` | **Command Prompt** (`cmd.exe`) |
+| **Linux** (Ubuntu/Debian, Fedora, openSUSE, Arch) | `x86_64` & `arm64` | `setup.sh` | Any terminal (bash) |
 
 ---
 
@@ -47,12 +48,29 @@ Each component is detected independently:
 | **3. Zepher CLI** | **Zepher** ([`zepher-cli`](https://www.npmjs.com/package/zepher-cli)) — a persistent context, memory, and universal agent environment manager that synchronizes rules and skills across AI coding agents. *(Specifically `zepher-cli`, never `zephyr-cli`.)* | `zepher` |
 | **4. Orca Desktop App** | **Orca** ([onorca.dev](https://www.onorca.dev)) — an Agent Development Environment (ADE) desktop application for running and coordinating AI coding agents in isolated Git worktrees. | `Orca.app` (macOS) / `Orca.exe` (Windows) |
 | **5. Orca CLI** | The command-line interface bundled with the Orca desktop app for scripting worktrees, agent terminals, and the built-in browser from your shell. | `orca` |
+| **6. GitHub CLI** | GitHub from the terminal: issues, Project boards, branches, and pull requests. Orca also uses it for its PR and Checks panels. | `gh` |
+| **7. GitHub over SSH** | Signs `gh` in to **your** GitHub account (in your browser), creates an SSH key if you don't have one, uploads it to GitHub, and makes `git` use SSH. Also fills in your Git name/email if they are empty. | `gh auth`, `~/.ssh/id_ed25519` |
+| **8. AI agent CLIs** | Claude Code and OpenCode, installed with npm (from the USB kit's offline cache when present). Choose with `--agents claude`, `--agents opencode` or `--agents none`. You sign in to them yourself. | `claude`, `opencode` |
+| **9. jq** | Small JSON tool used by the `/new-issue`, `/start-task` and `/plan-project` skills. | `jq` |
+| **10. Event skills** | Copies this repo's [`skills/`](skills/) into Claude Code's skills folder. Skills you already have with the same name are left untouched. | `~/.claude/skills` |
+
+### What the GitHub-over-SSH step does (and doesn't do)
+
+1. **Signs in with `gh auth login --web`.** You copy a one-time code and approve it on github.com. The script never sees your password or token; `gh` stores the token in the macOS Keychain / Windows Credential Manager. It requests two scopes on top of `gh`'s defaults: `admin:public_key` (to upload your SSH key) and `project` (for GitHub Projects commands used at the event).
+2. **Uses your existing `~/.ssh/id_ed25519` if you have one.** It is never overwritten. If there is none, a new ed25519 key is created. On macOS you may choose a passphrase (it is saved in the Keychain). On Windows the new key has no passphrase so `git` works without prompts. Add one later with `ssh-keygen -p`.
+3. **Trusts GitHub's real host keys.** They are fetched from the GitHub API over HTTPS (`gh api meta`) and written to `known_hosts`, so there is no "Are you sure you want to continue connecting?" guesswork. Outdated GitHub entries are replaced.
+4. **Works on networks that block SSH port 22** (common on campus and venue Wi-Fi). If port 22 is blocked but 443 works, it adds a clearly marked `Host github.com` block to `~/.ssh/config` that routes SSH through `ssh.github.com:443`, after backing up the file to `config.bak-beyond-the-prompt`.
+5. **Uploads the public key** with `gh ssh-key add`, titled `beyond-the-prompt <computer name>`.
+6. **Verifies** with `ssh -T git@github.com` and checks that the SSH key and `gh` belong to the same GitHub account.
+7. **Sets `git config --global user.name/user.email` only if they are empty**, using your GitHub no-reply address (`<id>+<login>@users.noreply.github.com`).
+
+Run with `--no-prompt` and this step reports `ACTION REQUIRED` instead of opening a browser.
 
 ---
 
 ## Quick Start Instructions
 
-Participants only need to run **one script** for their operating system (`setup.zsh` on macOS or `setup.bat` on Windows).
+Participants only need to run **one script** for their operating system (`setup.zsh` on macOS, `setup.bat` on Windows, `setup.sh` on Linux).
 
 ### Option A: Clone with Git (If Git is Already Installed)
 
@@ -64,6 +82,7 @@ cd beyond-the-prompt
 Then run the script for your operating system:
 - **macOS**: `chmod +x setup.zsh && ./setup.zsh`
 - **Windows**: `setup.bat`
+- **Linux**: `chmod +x setup.sh && ./setup.sh`
 
 ---
 
@@ -77,6 +96,7 @@ Then run the script for your operating system:
 4. Run:
    - **macOS**: `chmod +x setup.zsh && ./setup.zsh`
    - **Windows**: `setup.bat`
+- **Linux**: `chmod +x setup.sh && ./setup.sh`
 
 ---
 
@@ -87,6 +107,12 @@ If you downloaded only `setup.zsh` (macOS) or `setup.bat` (Windows) by itself ou
 - You can also pass a downloaded ZIP file directly:
   - **macOS**: `./setup.zsh --local-zip ~/Downloads/beyond-the-prompt-main.zip`
   - **Windows**: `setup.bat --local-zip "%USERPROFILE%\Downloads\beyond-the-prompt-main.zip"`
+
+---
+
+### Slow Internet at the Venue? Use the Offline Kit
+
+Volunteers carry a USB kit (`Beyond the Prompt` folder) with the official installers for Git (Windows), Node.js 22, GitHub CLI, Orca and jq. It also has an offline npm cache for Zepher, Claude Code and OpenCode, and a copy of this repo. Open `START-HERE.txt` on the USB, copy your OS folder to your laptop, install from it, then run the setup script as below. It will mark those tools `SKIPPED` and only use the internet for GitHub sign-in.
 
 ---
 
@@ -105,6 +131,17 @@ chmod +x setup.zsh
 ```
 
 ---
+
+### Step 2C: Run the Setup Script on Linux
+
+In any terminal inside the repository folder:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+It installs Node.js, GitHub CLI and jq per-user into `~/.local` (no sudo). It only uses `sudo` for your distribution's package manager, and shows the command first: for Git/OpenSSH if missing, and for Orca's `.deb`/`.rpm` on apt, dnf and zypper systems. Other distributions, and runs with `--no-prompt`, get Orca's AppImage in `~/Applications` instead. On Linux the Orca CLI is called `orca-ide`. NixOS isn't handled; install the tools through your configuration and use `--check-only`.
 
 ### Step 2B: Run the Setup Script on Windows
 
@@ -132,6 +169,7 @@ Neither script assumes a package manager is installed, and neither script ever i
 | **Git CLI** | Uses Apple's official `xcode-select --install` (or `brew install git` fallback). | Uses Apple's built-in `xcode-select --install` (Command Line Developer Tools) — no Homebrew needed. |
 | **Node.js & npm** | Installs `node@22` via `brew install node@22`. | Downloads the official **Node.js v22 LTS** standalone archive (`node-v22.x.x-darwin-arm64.tar.gz` or `darwin-x64.tar.gz`) from `https://nodejs.org/dist/latest-v22.x/`, verifies its **SHA-256 checksum** against the official `SHASUMS256.txt` manifest, and installs it **per-user** into `~/.local/node-lts` with symlinks in `~/.local/bin` (**zero `sudo` / admin rights required**). |
 | **Zepher CLI** | Installs globally via `npm install -g zepher-cli` (uses per-user `~/.npm-global` if `/usr/local` requires `sudo`). | Installs per-user into `~/.local/node-lts` or `~/.npm-global` via `npm install -g zepher-cli` (**zero `sudo` required**). |
+| **GitHub CLI** | Installs via `brew install gh`. | Downloads the official `gh_<version>_macOS_arm64.zip` or `macOS_amd64.zip` from GitHub Releases, verifies its **SHA-256 checksum** against the release's `checksums.txt`, and installs it **per-user** into `~/.local/gh` with a symlink in `~/.local/bin` (**zero `sudo`**). |
 | **Orca Desktop App** | Installs via `brew install --cask stablyai/orca/orca`. | Downloads the official `orca-macos-arm64.dmg` or `orca-macos-x64.dmg` from GitHub Releases, verifies its **SHA-256 digest** against the official GitHub Release API and its **Apple code signature** via `codesign --verify --deep --strict`, mounts the `.dmg` read-only, and copies `Orca.app` into `/Applications` (if writable) or per-user `~/Applications/Orca.app`. |
 
 > **Why Homebrew Is Never Installed Automatically:** Installing Homebrew modifies system directories (`/opt/homebrew` on Apple Silicon or `/usr/local` on Intel), installs system-wide build tools, and requires administrator (`sudo`) access. Because all event tools can be installed using Apple's built-in tools and official standalone distributions, `setup.zsh` never forces a Homebrew installation.
@@ -143,6 +181,7 @@ Neither script assumes a package manager is installed, and neither script ever i
 | **Git CLI** | Runs `winget install --id Git.Git --scope user -e --source winget` (falling back to standard scope if needed). | Opens the official Git for Windows download page (`https://git-scm.com/download/win`), guides you through the official standalone installer (supporting per-user installation without admin rights), pauses, refreshes `PATH`, and re-verifies `git --version`. |
 | **Node.js & npm** | Runs `winget install --id OpenJS.NodeJS.LTS -e --source winget`. | Downloads the official **Node.js v22 LTS** standalone Windows archive (`node-v22.x.x-win-x64.zip` or `win-arm64.zip`) from `https://nodejs.org/dist/latest-v22.x/`, verifies its **SHA-256 checksum** via `certutil -hashfile` against `SHASUMS256.txt`, and extracts it **per-user** into `%LocalAppData%\Programs\nodejs` (**zero Administrator rights required**). |
 | **Zepher CLI** | Verifies package metadata on npm and runs `npm install -g zepher-cli`. | Verifies package metadata on npm and runs `npm install -g zepher-cli` into per-user `%AppData%\npm`. |
+| **GitHub CLI** | Runs `winget install --id GitHub.cli -e --source winget`. | Downloads the official `gh_<version>_windows_amd64.zip` or `windows_arm64.zip` from GitHub Releases, verifies its **SHA-256 checksum** via `certutil -hashfile` against the release's `checksums.txt`, and extracts it **per-user** into `%LocalAppData%\Programs\gh` (**zero Administrator rights required**). |
 | **Orca Desktop App** | Opens `https://www.onorca.dev/docs/install` (Orca does not publish an official `winget` package ID), pauses for the official installer (`orca-windows-setup.exe`), and verifies `Orca.exe`. | Same official standalone installer flow (`%LocalAppData%\Programs\Orca\Orca.exe` per-user installation). |
 
 ---
@@ -157,7 +196,7 @@ At the end of every run, the script prints a summary table with a status for eac
 - **`FAIL`**: A required check or installation step failed. Follow the numbered recovery step printed below the table.
 
 ### Final Readiness Banner
-- **`FULLY READY`**: All 5 components show `PASS` or `SKIPPED`. You are 100% ready for the event!
+- **`FULLY READY`**: All 10 components show `PASS` or `SKIPPED`. You are 100% ready for the event!
 - **`PARTIALLY READY`**: Core tools are in place and zero errors occurred, but one or more items show `ACTION REQUIRED`. Complete the listed manual instructions, **open a new terminal window**, and re-run the setup script to reach `FULLY READY`.
 - **`NOT READY`**: One or more required components reported `FAIL`. Follow the recovery instructions in the terminal output or the Troubleshooting section below, then re-run the script.
 
@@ -227,6 +266,19 @@ Installing the Orca desktop app does not automatically place `orca` on your `PAT
    orca status --json
    ```
 
+### 7. GitHub CLI & SSH Issues
+
+| Symptom | Fix |
+| :--- | :--- |
+| `gh: command not found` after install | Open a **new** terminal. Standalone installs live in `~/.local/bin` (macOS) or `%LocalAppData%\Programs\gh\bin` (Windows). |
+| Browser code never completes | Open [https://github.com/login/device](https://github.com/login/device) yourself and type the code. Make sure you're signed in to the right GitHub account. |
+| `GH_TOKEN / GITHUB_TOKEN is set` | Remove the variable (`unset GH_TOKEN GITHUB_TOKEN` on macOS, Environment Variables on Windows), open a new terminal, re-run. |
+| "SSH unreachable on ports 22 and 443" | The network blocks SSH entirely. Switch to a phone hotspot and re-run. |
+| "SSH key belongs to X, but gh is signed in as Y" | Your existing key is on another GitHub account. Sign `gh` in as that account, or re-run with `ONBOARD_SSH_KEY_PATH=~/.ssh/id_ed25519_<login>` to make a separate key. |
+| Windows: "Key has a passphrase and the Windows ssh-agent is not running" | In an Administrator PowerShell: `Get-Service ssh-agent \| Set-Service -StartupType Automatic; Start-Service ssh-agent`, then re-run. |
+| Check it by hand | `gh auth status` and `ssh -T git@github.com` (prints "Hi &lt;login&gt;! You've successfully authenticated"). |
+| Old repos still ask for a password | They were cloned over HTTPS. Switch one with `git remote set-url origin git@github.com:<owner>/<repo>.git`. |
+
 ---
 
 ## Official Tool Documentation
@@ -240,3 +292,5 @@ Installing the Orca desktop app does not automatically place `orca` on your `PAT
 - **Orca Website**: [https://www.onorca.dev](https://www.onorca.dev)
 - **Orca Installation Guide**: [https://www.onorca.dev/docs/install](https://www.onorca.dev/docs/install)
 - **Orca CLI Overview**: [https://www.onorca.dev/docs/cli/overview](https://www.onorca.dev/docs/cli/overview)
+- **GitHub CLI**: [https://cli.github.com](https://cli.github.com)
+- **GitHub SSH guide**: [https://docs.github.com/en/authentication/connecting-to-github-with-ssh](https://docs.github.com/en/authentication/connecting-to-github-with-ssh)

@@ -1,0 +1,5 @@
+# cmd.exe misparses labels in LF-only batch files; git checkout and GitHub ZIP
+# downloads both honour this, so participants always get CRLF.
+*.bat text eol=crlf
+*.zsh text eol=lf
+*.sh  text eol=lf
