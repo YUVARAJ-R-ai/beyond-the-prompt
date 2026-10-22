@@ -281,6 +281,15 @@ Installing the Orca desktop app does not automatically place `orca` on your `PAT
 
 ---
 
+## Event Guides
+
+- [Orca automation templates](docs/orca-automations.md): what each field in Orca's *Create automation* dialog does, a safe prompt skeleton, and 10 ready-to-paste automations
+- [Zepher guide](docs/zepher-guide.md): every Zepher command and how a team uses it with its agents
+- [Skills guide](docs/skills-guide.md): why and how to use each of the 31 event skills, in one page
+- [Event skills](skills/README.md): `/new-issue`, `/start-task`, `/plan-project` and 28 more
+
+---
+
 ## Official Tool Documentation
 
 - **Git CLI**: [https://git-scm.com/doc](https://git-scm.com/doc)
